@@ -13,6 +13,8 @@ import sys
 from queuelib import FifoDiskQueue
 import json
 from scipy import stats
+from ast import literal_eval
+from shapely.geometry import Point, Polygon
 
 configfile = sys.argv[1]
 
@@ -69,7 +71,7 @@ def speeds_parallel(df_t):  # Why is this considered parallel?
     #Need to convert this to pixels per second
     #df_t['inst_speed'] = df_t['inst_speed'] #* 3 * 2.23694/50
     #df_t['inst_speed'] = df_t['inst_speed'] / (3 * 2.23694/50)
-    df_t['absspeed'] = df_t['inst_speed'].rolling(window=3).mean()
+    df_t['absspeed'] = df_t['inst_speed'].rolling(window=5).mean()
     df_t['absspeed'] = df_t['absspeed'].fillna(0)
     df_t['speeddiff'] = df_t['absspeed'].diff()
     df_t['speeddiff'] = df_t['speeddiff'].fillna(0)
@@ -169,9 +171,8 @@ def findTTC(cx1, cy1, cx2, cy2, vx1, vy1, vx2, vy2):
 
     return rx1, ry1, rt1, rt2
 
-def TTI(df_gppy, cpi_dict, threshold=2): # , cpi_frame=None
-    drac = {'car': 50, 'truck': 50, 'semi': 2,'bus': 5, 'pedestrian': 100, 'motorbike': 75, 'vehicle' : 50}
-    
+def TTI(df_gppy, cpi_dict, gp, vehspat, vphasetime, threshold=10): # , cpi_frame=None
+    mdrac = {'car': 50, 'truck': 50, 'semi': 2,'bus': 5, 'pedestrian': 100, 'motorbike': 75, 'vehicle' : 50, 'vehicle': 50}
     conflicting_phases = {
             1: [4,8,3,7,2],
             2: [4,8,3,7,1],
@@ -225,12 +226,48 @@ def TTI(df_gppy, cpi_dict, threshold=2): # , cpi_frame=None
 #             ax1, ay1, ax2, ay2 = rowi['accleration'], rowi['accleration'], rowj['accleration'], rowj['accleration']
             
             ## Compute Metrics ##
-            conflict_x, conflict_y, t1, t2 = findTTC(cx1, cy1, cx2, cy2, vx1, vy1, vx2, vy2) 
             diffabs = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2)
+            distance_threshold_pixels = 10 * 50/3
+            sp1, sp2 = rowi['inst_speed'] * (3 * 2.23694/50), rowj['inst_speed'] * (3 * 2.23694/50)
+            speed_threshold = 2
+            
+#            if (sp1 < speed_threshold or sp2 < speed_threshold):
+#                print ('Speed Threshold')
+#                continue
+#            if diffabs > distance_threshold_pixels:
+#                print ('Distance Threshold')
+#                continue
+             
+            dfobj1, dfobj2 = gp.get_group(rowi['unique_ID']), gp.get_group(rowj['unique_ID'])
+            start_frame = rowi.frame_id - 5
+            last_frame = rowi.frame_id + 2
+            acc1 = dfobj1[(dfobj1.frame_id>start_frame)&(dfobj1.frame_id<=last_frame)]
+            start_frame = rowi.frame_id - 5
+            last_frame = rowi.frame_id + 2
+            acc2 = dfobj2[(dfobj2.frame_id>start_frame)&(dfobj2.frame_id<=last_frame)]
+            accel1 = acc1[acc1.accleration < 0]
+            accel2 = acc2[acc2.accleration < 0]
+#            if (accel1.empty and accel2.empty):
+#                print ('Acceleration Threshold')
+#                continue
+
+            accel1value = 0
+            accel2value = 0
+            accel1time = str(0)
+            accel2time = str(0)
+            if (accel1.empty == False):
+                accel1value = accel1.iloc[accel1['accleration'].argmin()].accleration
+                t = accel1.iloc[accel1['accleration'].argmin()].timestamp
+                accel1time = t.strftime("%Y-%m-%d %H:%M:%S.%f")
+            if (accel2.empty == False):
+                accel2value = accel2.iloc[accel2['accleration'].argmin()].accleration
+                t = accel2.iloc[accel2['accleration'].argmin()].timestamp
+                accel2time = t.strftime("%Y-%m-%d %H:%M:%S.%f")
+            conflict_x, conflict_y, t1, t2 = findTTC(cx1, cy1, cx2, cy2, vx1, vy1, vx2, vy2) 
             #t2 = (vx1 * cy1 - vx1 * cy2 + vy1 * cx2 - vy1 * cx1) / ((vx1 * vy2 - vx2* vy1) + 0.001)  # X plugged into Y
             #t1 = (cx2 - cx1 + vx2 * t2) / (vx1 + 0.001) if vx1 != 0 else (cy2 - cy1 + vy2 * t2) / (vy1 + 0.001)
             #conflict_x, conflict_y = (cx1 + vx1 * t1), (cy1 + vy1 * t1)
-            
+           
             ## Comparisons Not of Interest ##
             if (conflict_x < 0 or conflict_x > 1279 or conflict_y < 0 or conflict_y > 959):  # Conflict Outside Intersection
                 continue
@@ -238,15 +275,16 @@ def TTI(df_gppy, cpi_dict, threshold=2): # , cpi_frame=None
                 continue
             if (t1<0) or (t2<0):  # Negative TTC's
                 continue
-            
             ## Compute Metrics pt.2 ##
-            drac1 = (vx1**2)/(2*(vx1*cx1*t1)+0.001)  # V^2/2s
-            drac2 = (vx2**2)/(2*(vx2*cx2*t2)+0.001)
-            madr1 = drac[rowi['class']] # deceleration CPI FORMULA
-            madr2 = drac[rowj['class']]
+            sp1mps = sp1 * 0.44704 # mph -> mps
+            sp2mps = sp2 * 0.44704 # mph -> mps
+            drac1 = (sp1mps**2)/(2*diffabs)  # V^2/2s
+            drac2 = (sp2mps**2)/(2*diffabs)
+            madr1 = mdrac[rowi['class']]*3/50 # deceleration CPI FORMULA
+            madr2 = mdrac[rowj['class']]*3/50
             cpi1, cpi2 = [int(d>m) for d, m in [(drac1, madr1), (drac2, madr2)]]
-            cp1 = cpi1*rowi['td']
-            for ID, t, c in [(rowi['unique_ID'],rowi['timestamp'],cpi1), (rowj['unique_ID'],rowj['timestamp'],cpi2)]:
+            cp1, cp2 = cpi1*rowi['td'], cpi2*rowj['td']
+            for ID, t, c in [(rowi['unique_ID'],rowi['timestamp'],cp1), (rowj['unique_ID'],rowj['timestamp'],cp2)]:
                 total = cpi_dict[ID]['total']
                 c = c / total if total != 0 else 0
                 cpi_dict[ID]['cpi'] = cpi_dict[ID]['cpi'] + c
@@ -256,6 +294,8 @@ def TTI(df_gppy, cpi_dict, threshold=2): # , cpi_frame=None
             d['intersection_id'] = rowi['intersection_id']
             d['camera_id'] = rowi['camera_id']
             d['timestamp'] = rowi['timestamp']
+            d['dow'] = rowi.timestamp.weekday()
+            d['hod'] = rowi.timestamp.hour
             d['frame_id'] = rowi['frame_id']
             d['conflict_x'], d['conflict_y'] = conflict_x, conflict_y
             d['unique_ID1'], d['unique_ID2'] = rowi['unique_ID'], rowj['unique_ID']
@@ -267,8 +307,25 @@ def TTI(df_gppy, cpi_dict, threshold=2): # , cpi_frame=None
             d['p2v'] = p2v
             d['city'] = rowi['city']
             d['cluster1'], d['cluster2'] = rowi['cluster'], rowj['cluster']
-            d['speed1'] = np.sqrt(vx1**2 + vy1**2) * (3 * 2.23694/50)
-            d['speed2'] = np.sqrt(vx2**2 + vy2**2) * (3 * 2.23694/50)
+            d['speed1'] = sp1
+            d['speed2'] = sp2
+            d['deceleration1'] = abs(accel1value)
+            d['deceleration2'] = abs(accel2value)
+            d['decel1_ts'] = accel1time
+            d['decel2_ts'] = accel2time
+            d['type'] = 1 #TTC
+            d['signal_state'] = rowi['SPAT']
+            vindex = np.searchsorted(vehspat.timestamp, rowi.timestamp)
+            vexactmatch = vehspat.iloc[vindex-1]
+            try:
+                vinterval = vphasetime.iloc[vindex]
+            except:
+                vinterval = 0
+            d['phase_duration'] = vinterval
+            relative_time = (rowi.timestamp - vexactmatch.timestamp).total_seconds()
+            d['percent_in_phase'] = relative_time*100/vinterval
+            #d['cpi1'] = cpi_dict[rowi.unique_ID]
+            #d['cpi2'] = cpi_dict[rowj.unique_ID]
             list_.append(d)           
     return list_
 
@@ -279,6 +336,34 @@ def do_main(body):
     ################################################ GET TRACKS #########################################################
     #print("Querying Tracks")
     mydb = pymysql.connect(host='maltlab.cise.ufl.edu', user='root', password='maltserver', database='testdb')
+    spat_start = pd.to_datetime(start_time) - datetime.timedelta(minutes=30)
+    spat_end = pd.to_datetime(end_time) + datetime.timedelta(minutes=30)
+    spat_query  = "SELECT * FROM OnlineSPaT where intersection_id = '{}'  AND timestamp >= '{}' AND timestamp <= '{}'".format(intersection_id,spat_start.strftime("%Y-%m-%d %H:%M:%S"),spat_end.strftime("%Y-%m-%d %H:%M:%S"))
+
+    spatdf = pd.read_sql(spat_query, con=mydb)
+    vehspat = spatdf[spatdf['type']==1]
+    vphasetime = vehspat.timestamp.diff().dt.total_seconds()
+
+    intersectionquery = 'SELECT * from IntersectionProperties where intersection_id={} and camera_id={};'.format(intersection_id, camera_id)
+    intersectionprop = pd.read_sql(intersectionquery, con=mydb)
+    median_width = {}
+    median_width[2] = intersectionprop['median_2'][0]
+    median_width[4] = intersectionprop['median_4'][0]
+    median_width[6] = intersectionprop['median_6'][0]
+    median_width[8] = intersectionprop['median_8'][0]
+    median_width[0] = 0
+    poly = intersectionprop['polygon'][0]
+    polylist = [literal_eval(poly)]
+    flat_list = [item for sublist in polylist for item in sublist]
+    polygon = Polygon(flat_list)
+
+    box = polygon.minimum_rotated_rectangle
+    x, y = box.exterior.coords.xy
+    edge_length = (Point(x[0], y[0]).distance(Point(x[1], y[1])), Point(x[1], y[1]).distance(Point(x[2], y[2])))
+    length = max(edge_length)
+    width = min(edge_length)
+    mbr = np.sqrt(length*length + width*width)
+
     sql_query  = "SELECT * FROM RealDisplayInfo where intersection_id = {}  AND timestamp >= '{}' AND timestamp <= '{}'".format(intersection_id,start_time,end_time)
     tracks = pd.read_sql(sql_query, con=mydb)
     tracks['timestamp'] = pd.to_datetime(tracks['timestamp'])
@@ -324,36 +409,67 @@ def do_main(body):
     for uid,rows in gp:
         firstindex = 0
         lastindex = np.shape(rows)[0]-1
-        start_time = rows['timestamp'].to_list()[firstindex]
-        end_time = rows['timestamp'].to_list()[lastindex]
-        cpi_dict[uid] = {'cpi': 0, 'total': (end_time - start_time).total_seconds()}
+        tslist = rows['timestamp'].to_list()
+        start_time = tslist[firstindex]
+        end_time = tslist[lastindex]
+        total_time = (end_time - start_time).total_seconds()
+        cpi_dict[uid] = {'cpi': 0, 'total': total_time}
     #print("Computing ttcs")
     ############################################## COMPUTE TTCs ###########################################################
     #processed_list = Parallel(n_jobs=num_cores)(delayed(TTI)(l, intersections, threshold) for _,l in cgpby)
     # Process tracks
     num_cores = 10
-    processed_list = Parallel(n_jobs=num_cores)(delayed(TTI)(l, cpi_dict) for _,l in cgpby)
+    processed_list = Parallel(n_jobs=num_cores)(delayed(TTI)(l, cpi_dict, gp, vehspat, vphasetime) for _,l in cgpby)
     #for indexname, rows in cgpby:
-        #TTI(rows, cpi_dict)
+        #TTI(rows, cpi_dict, gp, vehspat, vphasetime)
     cflat_list = [item for sublist in processed_list for item in sublist]
-    cpi_df = pd.DataFrame.from_dict(cpi_dict).T  ##### Unique column name
-    update_cpi_query='update TracksReal set cpi=%s where unique_ID=%s;'
-    updaterows = []
-    for key in cpi_dict:
-        if (cpi_dict[key]['cpi'] > 0):
-            updaterows.append((str(cpi_dict[key]['cpi']), str(key)))
-    if updaterows:
-        cursor.executemany(updatetrackquery, updaterows)
     if (len(cflat_list) > 0):
         cgaps = pd.DataFrame(cflat_list)
-        
+        cpi1 = [cpi_dict[uid]['cpi'] for uid in cgaps.unique_ID1]
+        cpi2 = [cpi_dict[uid]['cpi'] for uid in cgaps.unique_ID2]
+        cgaps['cpi1'] = cpi1
+        cgaps['cpi2'] = cpi2
+        conflictsgpby = cgaps.groupby(['unique_ID1', 'unique_ID2'])
+        unique_conflicts = pd.DataFrame(columns=cgaps.columns)
+        for index, rows in conflictsgpby:
+            unique_conflicts = unique_conflicts.append(rows[rows.ttc == rows.ttc.min()])
+        conflictsgpby = unique_conflicts.groupby(['unique_ID1'])
+        uid1_conflicts = pd.DataFrame(columns=cgaps.columns)
+        count1 = {}
+        for index, rows in conflictsgpby:
+            uid1_conflicts = uid1_conflicts.append(rows.iloc[0])
+            count1[index] = rows.shape[0]
+        uid2_conflicts = pd.DataFrame(columns=cgaps.columns)
+        conflictsgpby = unique_conflicts.groupby(['unique_ID2'])
+        count2 = []
+        for index, rows in conflictsgpby:
+            uid2_conflicts = uid2_conflicts.append(rows.iloc[0])
+            c2 = rows.shape[0]
+            if (count1.get(index)):
+                c2 = c2 + count1[index]
+            count2.append(c2)
+        uid2_conflicts['num_involved'] = count2
+        uid2_conflicts['intersection_diagonal'] = [mbr] * uid2_conflicts.shape[0]
+        phases = [0] * uid2_conflicts.shape[0]
+        phase1 = uid2_conflicts.phase1
+        phase2 = uid2_conflicts.phase2
+        phases = [2 if phase1.iloc[i] == 5 or phase1.iloc[i] == 7 or phase2.iloc[i] == 5 or phase2.iloc[i] == 7 else phases[i] for i in range(uid2_conflicts.shape[0])]
+        phases = [6 if phase1.iloc[i] == 1 or phase1.iloc[i] == 3 or phase2.iloc[i] == 1 or phase2.iloc[i] == 3 else phases[i] for i in range(uid2_conflicts.shape[0])]
+        median = [median_width[i] for i in phases]
+        uid2_conflicts['median_width'] = median
+        tslist = uid2_conflicts['timestamp']
+        start_time = tslist-datetime.timedelta(seconds = 30)
+        end_time = tslist+datetime.timedelta(seconds = 30)
+        number_vehicles = [track_p[(track_p['timestamp'] > s) & (track_p['timestamp'] < e)].shape[0] for s, e in zip(start_time, end_time)]
+        uid2_conflicts['total_vehicles'] = number_vehicles
+
         mydb = pymysql.connect(host='maltlab.cise.ufl.edu', user='root', password='maltserver', database='testdb')
         cursor=mydb.cursor()
-        cols = "`,`".join([str(i) for i in cgaps.columns.tolist()])
-        sql = "INSERT INTO `TTCTable` (`" +cols + "`) VALUES (" + "%s,"*(cgaps.shape[1]-1) + "%s)"
+        cols = "`,`".join([str(i) for i in uid2_conflicts.columns.tolist()])
+        sql = "INSERT INTO `TTCTable` (`" +cols + "`) VALUES (" + "%s,"*(uid2_conflicts.shape[1]-1) + "%s)"
         logging.info("Inserting records to database")
-        cgaps.timestamp = cgaps.timestamp.astype(str)
-        tuples = [tuple(x) for x in cgaps.to_numpy()]
+        uid2_conflicts.timestamp = uid2_conflicts.timestamp.astype(str)
+        tuples = [tuple(x) for x in uid2_conflicts.to_numpy()]
         cursor.executemany(sql, tuples)
         mydb.commit()
         cursor.close()
@@ -368,8 +484,9 @@ if __name__ == "__main__":
 #    else:
 #        sys.exit("No message found")
 
-    argdf = pd.read_csv('test.csv', header=None)
+    argdf = pd.read_csv('2175.csv', header=None)
     arglist = argdf.to_numpy().tolist()
+    arglist = [[2175, 15, ' 2021-10-13 17:10:00', ' 2021-10-13 17:20:00']]
 
     for cmd in arglist:
         print (cmd)
