@@ -64,12 +64,12 @@ def stratify_by_phase(vehspat, pedspat, vphasetime, pedphasetime, ttc_pet, field
     print (counts)
     return inphase
 
-intersection_id = 2175
-start_time='2021-10-09 06:00:00'
-end_time='2021-10-09 19:00:00'
-#intersection_id = 5060
-#start_time='2021-10-09 08:00:00'
+#intersection_id = 2075
+#start_time='2021-10-09 06:00:00'
 #end_time='2021-10-15 19:00:00'
+intersection_id = 5056
+start_time='2021-10-09 08:00:00'
+end_time='2021-10-09 19:00:00'
 mydb = pymysql.connect(host=dboptions['host'], user=dboptions['user'], passwd=dboptions['passwd'], db=dboptions['testdb'], port=int(dboptions['port']))
 
 sql_query = "SELECT * FROM TTCTable"
@@ -111,7 +111,14 @@ tracks['timestamp'] = pd.to_datetime(tracks['timestamp'])
 congpby = conflicts.groupby(['unique_ID1', 'unique_ID2'])
 unique_conflicts = pd.DataFrame(columns=conflicts.columns)
 for index, rows in congpby:
-    unique_conflicts = unique_conflicts.append(rows[rows.ttc == rows.ttc.min()])
+    trows = rows[rows.type == 1]
+    prows = rows[rows.type == 0]
+    if (trows.empty == False and trows.shape[0] > 1):
+        unique_conflicts = unique_conflicts.append(\
+                trows[trows.time == trows.time.min()].iloc[0])
+    if (prows.empty == False):
+        unique_conflicts = unique_conflicts.append(\
+                prows[prows.time == prows.time.min()].iloc[0])
 
 unique_conflicts['approach1'] = unique_conflicts['cluster1'].astype(str).str[0]
 unique_conflicts['approach2'] = unique_conflicts['cluster2'].astype(str).str[0]
@@ -121,7 +128,11 @@ unique_conflicts = unique_conflicts[unique_conflicts.approach1 != unique_conflic
 unique_conflicts = unique_conflicts[(unique_conflicts.speed1 < 60) & (unique_conflicts.speed2 < 60)]
 unique_conflicts['inphase'] = stratify_by_phase(vehspat, pedspat, vphasetime, pedphasetime, unique_conflicts, 'timestamp')
 
-plt.scatter(unique_conflicts['ttc'], unique_conflicts['max_speed'])
+#unique_conflicts = unique_conflicts[(unique_conflicts.distance < 170) & (unique_conflicts.speed1 > 10) & (unique_conflicts.speed2 > 10) & (unique_conflicts.deceleration1 > 0) & (unique_conflicts.deceleration2 > 0) & (unique_conflicts.time < 2.1) & (unique_conflicts.time > 0)]
+unique_conflicts = unique_conflicts[(unique_conflicts.distance < 170) & (unique_conflicts.speed1 > 10) & (unique_conflicts.speed2 > 10) & (unique_conflicts.deceleration1 > 0) & (unique_conflicts.time > 0)]
+print (unique_conflicts)
+
+plt.scatter(unique_conflicts['time'], unique_conflicts['max_speed'])
 plt.xlabel("Time to Collision")
 plt.ylabel("Speed (Miles per Hour")
 plt.show()
@@ -149,7 +160,7 @@ def get_line_formula(tableRow):
     line={}
     line['A'] = 1
     line['B'] = -1
-    line['C'] = float(tableRow['norm_max_speed']-tableRow['norm_ttc'])
+    line['C'] = float(tableRow['norm_max_speed']-tableRow['norm_time'])
     return line
 
 #The next step is to compute the position of a point relative to a line (above, below or on the line)
@@ -162,7 +173,7 @@ def get_line_formula(tableRow):
 #tableRow: containig the row (point) for which the position should be computed
 def position_wrt_line(line, tableRow):
     b = line['B']
-    evl = float(line['A']*tableRow['norm_ttc']+line['B']*tableRow['norm_max_speed']+line['C'])
+    evl = float(line['A']*tableRow['norm_time']+line['B']*tableRow['norm_max_speed']+line['C'])
     if evl == 0.:
         return 0
     if b > 0:
@@ -177,7 +188,7 @@ def position_wrt_line(line, tableRow):
 #line: the reference line based on which the position is computed
 #tableRow: containig the row (point) for which the position should be computed
 def get_distance(line, tableRow):
-    nom = float(abs(line['A']*tableRow['norm_ttc']+line['B']*tableRow['norm_max_speed']+line['C']))
+    nom = float(abs(line['A']*tableRow['norm_time']+line['B']*tableRow['norm_max_speed']+line['C']))
     denom = float(math.sqrt(line['A']**2 + line['B']**2))
     return position_wrt_line(line, tableRow)*(nom/denom)
 
@@ -190,13 +201,13 @@ def normalize_columns(table, column_list):
 
 def sort_table(input_table):
     #first, the ttc and max_speed columns should be normalized: 
-    table = normalize_columns(input_table, ['ttc', 'max_speed'])
+    table = normalize_columns(input_table, ['time', 'max_speed'])
     table.to_csv('normalized.csv')
     line = get_line_formula(table.iloc[[0]])
     table['tmp_col'] = table.apply(lambda row : -1*get_distance(line, row), axis = 1) #-1 is added to sort in descending order
     table.sort_values(by=['tmp_col', 'max_speed'], inplace=True)
     #print(table[['ttc', 'max_speed', 'tmp_col']])
-    return table.drop(columns=['tmp_col', 'norm_ttc', 'norm_max_speed'])
+    return table.drop(columns=['tmp_col', 'norm_time', 'norm_max_speed'])
 
 #For debugging only
 #i = 0
@@ -208,5 +219,3 @@ def sort_table(input_table):
 #For debugging only
 table = sort_table(unique_conflicts)
 table.to_csv('sorted_uniqu.csv')
-
-
